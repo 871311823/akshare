@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# ???????AkShare ?? MACD ????Flask?
+# ???
+# 1) ?????????????? 5001?
+# 2) ?? Python ???__pycache__/pyc???? pid/log
+# 3) ??????????????????/????
+
+set -euo pipefail
+
+APP_DIR="/root/akshare"
+APP_SCRIPT="$APP_DIR/examples/stock_screener_web.py"
+VENV="$APP_DIR/.venv"
+
+PORT="${PORT:-5001}"
+HOST="${HOST:-0.0.0.0}"
+
+LOG="/root/akshare_screener_${PORT}.log"
+PIDFILE="/root/akshare_screener_${PORT}.pid"
+
+say() { printf '%s\n' "$*"; }
+
+if [ ! -f "$APP_SCRIPT" ]; then
+  say "[ERROR] ???????: $APP_SCRIPT"
+  exit 1
+fi
+
+say "[INFO] ????: $PORT"
+
+# 1) ?????????
+pids="$(ss -ltnp 2>/dev/null | awk -v p=":${PORT}" '$4 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)"
+if [ -n "${pids}" ]; then
+  say "[INFO] ???? ${PORT} ??????????: ${pids}"
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 1
+  # ????????
+  pids2="$(ss -ltnp 2>/dev/null | awk -v p=":${PORT}" '$4 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)"
+  if [ -n "${pids2}" ]; then
+    say "[WARN] ???????????: ${pids2}"
+    for pid in $pids2; do
+      kill -9 "$pid" 2>/dev/null || true
+    done
+  fi
+fi
+
+# ????? pidfile??????
+if [ -f "$PIDFILE" ]; then
+  oldpid="$(cat "$PIDFILE" 2>/dev/null || true)"
+  if [ -n "${oldpid}" ]; then
+    kill "$oldpid" 2>/dev/null || true
+  fi
+  rm -f "$PIDFILE" || true
+fi
+
+# 2) ????/???
+say "[INFO] ????????..."
+find "$APP_DIR" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+find "$APP_DIR" -type f -name '*.pyc' -delete 2>/dev/null || true
+rm -f "$LOG" 2>/dev/null || true
+
+# 3) ?? venv + ?????????
+say "[INFO] ?? Python venv ???..."
+if [ ! -x "$VENV/bin/python" ]; then
+  python3 -m venv "$VENV"
+fi
+
+"$VENV/bin/python" -m pip install -U pip >/dev/null
+
+# ???akshare ???? pyproject.toml ????? editable ???????????
+"$VENV/bin/python" -m pip install -e "$APP_DIR" >/dev/null
+
+# Web ???? Flask????? akshare ??????
+"$VENV/bin/python" -m pip install -U flask >/dev/null
+
+# ???????????????? ufw?
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow "${PORT}/tcp" >/dev/null || true
+fi
+
+# ??????
+say "[INFO] ????..."
+nohup env HOST="$HOST" PORT="$PORT" "$VENV/bin/python" -u "$APP_SCRIPT" > "$LOG" 2>&1 &
+newpid=$!
+echo "$newpid" > "$PIDFILE"
+
+sleep 1
+if ss -ltnp 2>/dev/null | grep -q ":${PORT}"; then
+  say "[OK] ????: pid=${newpid}"
+else
+  say "[ERROR] ??????????$LOG??"
+  tail -n 120 "$LOG" || true
+  exit 1
+fi
+
+say "[INFO] ????: http://<???IP>:${PORT}"
+say "[INFO] ????: $LOG"
